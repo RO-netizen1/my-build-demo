@@ -1,0 +1,8 @@
+templates/
+output/
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+Thumbs.db
+*.tmp
