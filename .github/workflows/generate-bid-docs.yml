@@ -1,0 +1,146 @@
+name: 招标文件自动化生成
+
+on:
+  workflow_dispatch:
+    inputs:
+      config_file:
+        description: '项目配置文件路径'
+        required: false
+        default: 'projects.json'
+      output_dir:
+        description: '输出目录'
+        required: false
+        default: 'output'
+
+  push:
+    branches: [ main ]
+    paths:
+      - 'projects.json'
+      - 'templates/**'
+      - 'generate_bid.py'
+
+  schedule:
+    - cron: '0 0 * * *'
+
+concurrency:
+  group: bid-docs-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  validate:
+    name: 验证配置文件
+    runs-on: ubuntu-latest
+    outputs:
+      project_count: ${{ steps.count.outputs.count }}
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: 安装依赖
+        run: pip install python-docx
+
+      - name: 统计项目数量
+        id: count
+        run: |
+          COUNT=$(python3 -c "
+          import json
+          with open('projects.json') as f:
+              c = json.load(f)
+          print(len(c.get('projects', [])))
+          ")
+          echo "count=$COUNT" >> $GITHUB_OUTPUT
+          echo "📊 共检测到 $COUNT 个项目"
+
+  generate:
+    name: 生成招标文件
+    runs-on: ubuntu-latest
+    needs: validate
+    timeout-minutes: 30
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python 及依赖
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: 安装 Python 依赖
+        run: pip install python-docx
+
+      - name: 创建输出目录
+        run: mkdir -p output
+
+      - name: 初始化模板（如果模板不存在）
+        run: |
+          python3 -c "
+          import os, json
+          from docx import Document
+          os.makedirs('templates', exist_ok=True)
+          with open('projects.json', encoding='utf-8') as f:
+              config = json.load(f)
+          types = set(p.get('TYPE','市政房建') for p in config.get('projects',[]))
+          types.add('招标公告')
+          for t in types:
+              tpl_name = '招标公告_模板' if t == '招标公告' else f'{t}_模板'
+              tpl_path = f'templates/{tpl_name}.docx'
+              if os.path.exists(tpl_path):
+                  continue
+              doc = Document()
+              doc.add_heading('{{PROJECT_NAME}}', level=1)
+              if t == '招标公告':
+                  doc.add_paragraph('招 标 公 告')
+                  doc.add_paragraph('项目名称：{{PROJECT_NAME}}')
+                  doc.add_paragraph('项目编号：{{PROJECT_CODE}}')
+                  doc.add_paragraph('招标人：{{OWNER_NAME}}')
+                  doc.add_paragraph('资质要求：{{QUALIFY_LEVEL}}')
+                  doc.add_paragraph('投标截止：{{DEADLINE_DATE}}')
+              else:
+                  doc.add_paragraph(f'【{t}工程招标文件模板】')
+                  doc.add_paragraph('项目名称：{{PROJECT_NAME}}')
+                  doc.add_paragraph('工期：{{CONTRACT_PERIOD}} 天')
+                  doc.add_paragraph('质量标准：{{QUALITY_LEVEL}}')
+              doc.save(tpl_path)
+          "
+
+      - name: 执行招标文件生成
+        run: |
+          python3 generate_bid.py \
+            --config "projects.json" \
+            --output "output" \
+            --templates ./templates
+
+      - name: 上传生成结果
+        uses: actions/upload-artifact@v4
+        with:
+          name: 招标文件-${{ github.run_number }}
+          path: output/
+          retention-days: 30
+          if-no-files-found: warn
+
+  notify:
+    name: 完成通知
+    runs-on: ubuntu-latest
+    needs: [validate, generate]
+    if: always()
+
+    steps:
+      - name: 输出最终状态
+        run: |
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  招标文件自动化生成工作流执行完毕"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  验证状态: ${{ needs.validate.result }}"
+          echo "  生成状态: ${{ needs.generate.result }}"
+          echo "  项目数量: ${{ needs.validate.outputs.project_count }}"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
